@@ -1,4 +1,4 @@
-import os, sys, re, subprocess, datetime
+import os, sys, re, subprocess, datetime, time
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -70,8 +70,19 @@ def add_book(path):
             )
         )
         quit()
-
-    result = run_cmd(cmd_with_content_server, path)
+    
+    added = False
+    attempts = 0
+    while not added and attempts < 5:
+        result = run_cmd(cmd_with_content_server, path)
+        if result.returncode != 0:
+            log("Error adding via content server. Trying again in 5 seconds...")
+            attempts += 1
+            time.sleep(5)
+        else:
+            added = True
+    if not added:
+        log("[ERROR] Could not add book within 5 attempts.")
 
     return result
 
@@ -83,21 +94,34 @@ class Handler(FileSystemEventHandler):
             return None
         elif event.event_type == "created":
             file_path = event.src_path
-            log("File created: % s" % file_path)
+   
+            # Is it a valid ebook format?
             match = re.search(r"\.(epub|mobi|pdf|lit|azw3)$", file_path, re.I)
+            
+            # Is this a book created by Calibre? Don't import it, if so
+            dirpath = os.path.dirname(file_path)
+            folder = dirpath.split('/')[-1]
+            has_calibre_folder_name = re.match(r".*\s\(\d+\)", folder)
+            has_metadata = os.path.exists(f"{dirpath}/metadata.opf")
+            is_calibre_book = has_calibre_folder_name and has_metadata
 
             if match:
                 ext = match.group()
-                log(f"File is a {ext} - sending to Calibre...")
 
-                result = add_book(file_path)
+                log("Ebook file created: % s. Sending to Calibre..." % file_path)
+                
+                if not is_calibre_book:
+                    result = add_book(file_path)    
+                    success = re.match(r"((Added|Merged) book ids|The following books were not added as they already exist in the database)", result.stdout);
 
-                if result.returncode == 0:
-                    os.remove(file_path)
-                log(result.stdout, result.stderr)
+                    if result.returncode == 0 and success:
+                        os.remove(file_path)
 
-            else:
-                log("File is not an ebook file.")
+                    log(result.stdout, result.stderr)
+                    time.sleep(5) # Avoid too-quick requests to content server
+
+                else:
+                    log("File is already in Calibre. Not importing.")
 
         flush()
 
